@@ -1,24 +1,23 @@
-from io import BytesIO
 from datetime import date, timedelta
 from decimal import Decimal
+from io import BytesIO
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group, Permission
 from django.contrib.contenttypes.models import ContentType
+from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.core.exceptions import PermissionDenied, ValidationError
 from django.test import TestCase
 from django.urls import reverse
 from PIL import Image
 
 from farmacia.models import (
-    GRUPO_CLIENTE,
     GRUPO_FARMACEUTICO,
+    GRUPO_JEFE_FARMACIA,
+    ConsultaJefeFarmacia,
     IngresoInventario,
     Medicamento,
     Merma,
-    SolicitudCuenta,
-    SolicitudRevisionReceta,
     SimulacionPago,
     VentaCaja,
 )
@@ -26,78 +25,24 @@ from farmacia.models import (
 User = get_user_model()
 
 
-class RegistroUsuarioTests(TestCase):
+class AccesoYFarmaciaTests(TestCase):
     def setUp(self):
         self.admin = User.objects.create_superuser(
             username="jefe",
             email="jefe@example.com",
             password="Admin-password-123",
         )
-        self.datos_registro = {
-            "username": "nuevo_usuario",
-            "first_name": "Nuevo",
-            "last_name": "Usuario",
-            "email": "nuevo@example.com",
-            "rol_solicitado": SolicitudCuenta.RolSolicitado.FARMACEUTICO,
-            "password1": "Cuenta-segura-123",
-            "password2": "Cuenta-segura-123",
-        }
 
-    def test_registro_crea_cuenta_pendiente_inactiva(self):
-        respuesta = self.client.post(
-            reverse("registro"),
-            self.datos_registro,
-        )
-
-        self.assertRedirects(
-            respuesta,
-            reverse("login"),
-            fetch_redirect_response=False,
-        )
-        usuario = User.objects.get(username="nuevo_usuario")
-        solicitud = usuario.solicitud_cuenta
-        self.assertFalse(usuario.is_active)
-        self.assertEqual(solicitud.estado, SolicitudCuenta.Estado.PENDIENTE)
-        self.assertFalse(
-            self.client.login(username="nuevo_usuario", password="Cuenta-segura-123")
-        )
-
-    def test_cliente_se_registra_activo_sin_aprobacion(self):
-        self.datos_registro["rol_solicitado"] = SolicitudCuenta.RolSolicitado.CLIENTE
-
-        respuesta = self.client.post(reverse("registro"), self.datos_registro)
-
-        self.assertRedirects(
-            respuesta,
-            reverse("login"),
-            fetch_redirect_response=False,
-        )
-        cliente = User.objects.get(username="nuevo_usuario")
-        self.assertTrue(cliente.is_active)
-        self.assertFalse(SolicitudCuenta.objects.filter(usuario=cliente).exists())
-        self.assertTrue(cliente.groups.filter(name=GRUPO_CLIENTE).exists())
-        self.assertTrue(
-            self.client.login(username="nuevo_usuario", password="Cuenta-segura-123")
-        )
-
-    def test_pagina_de_login_incluye_registro_y_ambos_roles_publicos(self):
+    def test_login_es_pagina_inicial_sin_registro_ni_catalogo_publico(self):
         respuesta = self.client.get(reverse("login"))
 
         self.assertEqual(respuesta.status_code, 200)
-        self.assertContains(respuesta, "Registrarse")
+        self.assertContains(respuesta, "Acceso a tu cuenta")
+        self.assertNotContains(respuesta, "Registrarse")
+        self.assertNotContains(respuesta, "catalogo")
         self.assertNotContains(respuesta, "autofocus")
         self.assertContains(respuesta, "pie-sitio")
         self.assertContains(respuesta, "Tel&eacute;fono")
-        self.assertContains(respuesta, 'value="farmaceutico"')
-        self.assertContains(respuesta, 'value="cliente"')
-        self.assertNotContains(respuesta, 'value="jefe"')
-
-    def test_catalogo_publico_incluye_pie_y_estilos_del_sitio(self):
-        respuesta = self.client.get(reverse("catalogo"))
-
-        self.assertEqual(respuesta.status_code, 200)
-        self.assertContains(respuesta, "pie-sitio")
-        self.assertContains(respuesta, "Horarios de atenci")
         self.assertContains(respuesta, "farmacia/sitio.css?v=3")
 
     def test_superusuario_jefe_qf_va_al_admin_al_iniciar_sesion(self):
@@ -119,27 +64,41 @@ class RegistroUsuarioTests(TestCase):
             fetch_redirect_response=False,
         )
 
-    def test_cliente_va_al_catalogo_al_iniciar_sesion(self):
-        cliente = User.objects.create_user(
-            username="cliente",
-            password="Cliente-password-123",
+    def test_usuario_sin_grupo_no_puede_iniciar_sesion(self):
+        usuario = User.objects.create_user(
+            username="usuario",
+            password="Usuario-password-123",
         )
-        cliente.is_active = True
-        cliente.save(update_fields=("is_active",))
 
         respuesta = self.client.post(
             reverse("login"),
             {
-                "username": "cliente",
-                "password": "Cliente-password-123",
+                "username": "usuario",
+                "password": "Usuario-password-123",
             },
         )
 
-        self.assertRedirects(
-            respuesta,
-            reverse("catalogo"),
-            fetch_redirect_response=False,
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertContains(respuesta, "exclusiva para personal autorizado")
+        self.assertFalse("_auth_user_id" in self.client.session)
+
+    def test_usuario_staff_sin_rol_farmaceutico_no_puede_iniciar_sesion(self):
+        usuario = User.objects.create_user(
+            username="staff_sin_rol",
+            password="Staff-password-123",
+            is_staff=True,
         )
+
+        respuesta = self.client.post(
+            reverse("login"),
+            {
+                "username": "staff_sin_rol",
+                "password": "Staff-password-123",
+            },
+        )
+
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertContains(respuesta, "exclusiva para personal autorizado")
 
     def test_quimico_va_a_su_inicio_de_farmacia_al_iniciar_sesion(self):
         quimico = User.objects.create_user(
@@ -194,21 +153,6 @@ class RegistroUsuarioTests(TestCase):
         self.assertContains(respuesta, "Existencias: 12")
         self.assertContains(respuesta, "Ir a Caja")
         self.assertContains(respuesta, "pie-sitio")
-
-    def test_cliente_no_puede_entrar_a_caja_ni_inicio_de_farmacia(self):
-        cliente = User.objects.create_user(
-            username="cliente_privado",
-            password="Cliente-password-123",
-            is_active=True,
-        )
-        cliente.groups.add(Group.objects.get_or_create(name=GRUPO_CLIENTE)[0])
-        self.client.force_login(cliente)
-
-        inicio = self.client.get(reverse("farmacia:inicio"))
-        caja = self.client.get(reverse("farmacia:caja"))
-
-        self.assertEqual(inicio.status_code, 403)
-        self.assertEqual(caja.status_code, 403)
 
     def test_jefe_qf_puede_crear_medicamento_con_receta_desde_admin(self):
         self.client.force_login(self.admin)
@@ -482,56 +426,40 @@ class RegistroUsuarioTests(TestCase):
             content_type="image/png",
         )
 
-    def datos_solicitud_receta(self):
-        return {
-            "cliente_nombre": "Cliente de prueba",
-            "cliente_rut": "11.111.111-1",
-            "medicamento": "Medicamento recetado",
-            "cantidad": "1",
-            "medico_prescriptor": "Dra. Ejemplo",
-            "foto_receta": self.crear_imagen_receta(),
-        }
+    def crear_quimico(self, username="quimico"):
+        quimico = User.objects.create_user(
+            username=username,
+            password="Quimico-password-123",
+            is_active=True,
+        )
+        quimico.groups.add(Group.objects.get_or_create(name=GRUPO_FARMACEUTICO)[0])
+        return quimico
 
-    def test_visitante_puede_enviar_receta_y_solo_personal_autorizado_verla(self):
+    def test_quimico_envia_consulta_con_foto_y_solo_remitente_o_jefe_ve_la_foto(self):
+        quimico = self.crear_quimico()
+        self.client.force_login(quimico)
+
         respuesta = self.client.post(
-            reverse("farmacia:solicitar_receta"),
-            self.datos_solicitud_receta(),
+            reverse("farmacia:consultas_jefe"),
+            {
+                "asunto": "Duda sobre indicación",
+                "pregunta": "¿Podría confirmar la dosis indicada?",
+                "foto_receta": self.crear_imagen_receta(),
+            },
         )
 
         self.assertRedirects(
             respuesta,
-            reverse("farmacia:solicitar_receta"),
+            reverse("farmacia:consultas_jefe"),
             fetch_redirect_response=False,
         )
-        solicitud = SolicitudRevisionReceta.objects.get()
-        self.addCleanup(lambda: solicitud.foto_receta.delete(save=False))
-        self.assertIsNone(solicitud.cliente)
-        self.assertEqual(solicitud.estado, SolicitudRevisionReceta.Estado.PENDIENTE)
-        self.assertIn("private_recetas", solicitud.foto_receta.path)
+        consulta = ConsultaJefeFarmacia.objects.get()
+        self.addCleanup(lambda: consulta.foto_receta.delete(save=False))
+        self.assertEqual(consulta.solicitante, quimico)
+        self.assertEqual(consulta.estado, ConsultaJefeFarmacia.Estado.PENDIENTE)
 
-        foto_no_autorizada = self.client.get(
-            reverse("farmacia:foto_receta", args=(solicitud.pk,))
-        )
-        self.assertEqual(foto_no_autorizada.status_code, 302)
-
-        quimico = User.objects.create_user(
-            username="quimico_revision",
-            password="Revision-test-123",
-            is_active=True,
-        )
-        quimico.groups.add(Group.objects.get_or_create(name=GRUPO_FARMACEUTICO)[0])
-        self.client.force_login(quimico)
-
-        inicio = self.client.get(reverse("farmacia:inicio"))
-        self.assertEqual(inicio.context["recetas_pendientes"], 1)
-        self.assertContains(inicio, "Recetas por revisar")
-
-        bandeja = self.client.get(reverse("farmacia:revisar_recetas"))
-        self.assertContains(bandeja, "Cliente de prueba")
-        self.assertContains(bandeja, "Medicamento recetado")
-        self.assertContains(bandeja, "Aprobar revisión")
         foto = self.client.get(
-            reverse("farmacia:foto_receta", args=(solicitud.pk,))
+            reverse("farmacia:foto_consulta_jefe", args=(consulta.pk,))
         )
         self.assertEqual(foto.status_code, 200)
         self.assertEqual(foto["Content-Type"], "image/png")
@@ -539,122 +467,94 @@ class RegistroUsuarioTests(TestCase):
         self.assertEqual(foto["Cache-Control"], "private, no-store")
         foto.close()
 
-        respuesta = self.client.post(
-            reverse("farmacia:resolver_receta", args=(solicitud.pk,)),
-            {"decision": "aprobar", "respuesta": "Receta legible."},
-            follow=True,
+        otro_quimico = self.crear_quimico("otro_quimico")
+        self.client.force_login(otro_quimico)
+        foto_no_autorizada = self.client.get(
+            reverse("farmacia:foto_consulta_jefe", args=(consulta.pk,))
         )
+        self.assertEqual(foto_no_autorizada.status_code, 403)
 
-        self.assertContains(respuesta, f"La solicitud #{solicitud.pk} quedó aprobada")
-        solicitud.refresh_from_db()
-        self.assertEqual(solicitud.estado, SolicitudRevisionReceta.Estado.APROBADA)
-        self.assertEqual(solicitud.revisada_por, quimico)
-        self.assertEqual(solicitud.respuesta, "Receta legible.")
-        self.assertIsNotNone(solicitud.fecha_revision)
-        self.assertContains(respuesta, "Solicitudes revisadas")
-
-    def test_cliente_con_cuenta_puede_enviar_receta_asociada_a_su_usuario(self):
-        cliente = User.objects.create_user(
-            username="cliente_receta",
-            password="Cliente-test-123",
+        jefe = User.objects.create_user(
+            username="jefe_farmacia",
             is_active=True,
         )
-        cliente.groups.add(Group.objects.get_or_create(name=GRUPO_CLIENTE)[0])
-        self.client.force_login(cliente)
+        jefe.groups.add(Group.objects.get_or_create(name=GRUPO_JEFE_FARMACIA)[0])
+        self.client.force_login(jefe)
+        foto_jefe = self.client.get(
+            reverse("farmacia:foto_consulta_jefe", args=(consulta.pk,))
+        )
+        self.assertEqual(foto_jefe.status_code, 200)
+        foto_jefe.close()
+
+    def test_jefe_responde_consulta_solo_una_vez(self):
+        quimico = self.crear_quimico()
+        consulta = ConsultaJefeFarmacia.objects.create(
+            solicitante=quimico,
+            asunto="Consulta de prueba",
+            pregunta="¿Cuál es la indicación?",
+            foto_receta=self.crear_imagen_receta(),
+        )
+        self.addCleanup(lambda: consulta.foto_receta.delete(save=False))
+        jefe = User.objects.create_user(username="jefe_farmacia", is_active=True)
+        jefe.groups.add(Group.objects.get_or_create(name=GRUPO_JEFE_FARMACIA)[0])
+        self.client.force_login(jefe)
 
         respuesta = self.client.post(
-            reverse("farmacia:solicitar_receta"),
-            self.datos_solicitud_receta(),
+            reverse("farmacia:consultas_jefe"),
+            {"consulta_id": consulta.pk, "respuesta": "  Dosis confirmada.  "},
         )
 
         self.assertRedirects(
             respuesta,
-            reverse("farmacia:solicitar_receta"),
+            reverse("farmacia:consultas_jefe"),
             fetch_redirect_response=False,
         )
-        solicitud = SolicitudRevisionReceta.objects.get()
-        self.addCleanup(lambda: solicitud.foto_receta.delete(save=False))
-        self.assertEqual(solicitud.cliente, cliente)
+        consulta.refresh_from_db()
+        self.assertEqual(consulta.estado, ConsultaJefeFarmacia.Estado.RESPONDIDA)
+        self.assertEqual(consulta.respuesta, "Dosis confirmada.")
+        self.assertEqual(consulta.jefe_farmacia, jefe)
+        self.assertIsNotNone(consulta.fecha_respuesta)
 
-    def test_usuario_que_no_es_cliente_no_puede_enviar_solicitud_de_receta(self):
+        respuesta = self.client.post(
+            reverse("farmacia:consultas_jefe"),
+            {"consulta_id": consulta.pk, "respuesta": "Otra respuesta."},
+            follow=True,
+        )
+        self.assertContains(respuesta, "ya fue respondida")
+        consulta.refresh_from_db()
+        self.assertEqual(consulta.respuesta, "Dosis confirmada.")
+
+    def test_formulario_consulta_rechaza_archivo_que_no_es_imagen(self):
+        quimico = self.crear_quimico()
+        self.client.force_login(quimico)
+        respuesta = self.client.post(
+            reverse("farmacia:consultas_jefe"),
+            {
+                "asunto": "Duda sobre receta",
+                "pregunta": "Consulta de prueba",
+                "foto_receta": SimpleUploadedFile(
+                    "receta.png",
+                    b"esto no es una imagen",
+                    content_type="image/png",
+                ),
+            },
+        )
+
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertTrue(respuesta.context["form"].errors["foto_receta"])
+        self.assertFalse(ConsultaJefeFarmacia.objects.exists())
+
+    def test_usuario_sin_grupo_no_puede_abrir_consultas(self):
         usuario = User.objects.create_user(
             username="usuario_sin_rol",
-            password="Usuario-test-123",
+            password="Usuario-password-123",
             is_active=True,
         )
         self.client.force_login(usuario)
 
-        respuesta = self.client.get(reverse("farmacia:solicitar_receta"))
+        respuesta = self.client.get(reverse("farmacia:consultas_jefe"))
 
         self.assertEqual(respuesta.status_code, 403)
-
-    def test_usuario_no_farmaceutico_no_puede_revisar_solicitudes(self):
-        cliente = User.objects.create_user(
-            username="cliente_sin_revision",
-            password="Cliente-test-123",
-            is_active=True,
-        )
-        cliente.groups.add(Group.objects.get_or_create(name=GRUPO_CLIENTE)[0])
-        self.client.force_login(cliente)
-
-        respuesta = self.client.get(reverse("farmacia:revisar_recetas"))
-
-        self.assertEqual(respuesta.status_code, 403)
-
-    def test_quimico_puede_rechazar_solicitud_y_no_revisarla_dos_veces(self):
-        respuesta = self.client.post(
-            reverse("farmacia:solicitar_receta"),
-            self.datos_solicitud_receta(),
-        )
-        self.assertEqual(respuesta.status_code, 302)
-        solicitud = SolicitudRevisionReceta.objects.get()
-        self.addCleanup(lambda: solicitud.foto_receta.delete(save=False))
-
-        quimico = User.objects.create_user(
-            username="quimico_rechazo",
-            password="Revision-test-123",
-            is_active=True,
-        )
-        quimico.groups.add(Group.objects.get_or_create(name=GRUPO_FARMACEUTICO)[0])
-        self.client.force_login(quimico)
-
-        respuesta = self.client.post(
-            reverse("farmacia:resolver_receta", args=(solicitud.pk,)),
-            {"decision": "rechazar", "respuesta": "La foto está borrosa."},
-            follow=True,
-        )
-
-        self.assertContains(respuesta, "quedó rechazada")
-        solicitud.refresh_from_db()
-        self.assertEqual(solicitud.estado, SolicitudRevisionReceta.Estado.RECHAZADA)
-        self.assertEqual(solicitud.respuesta, "La foto está borrosa.")
-
-        respuesta = self.client.post(
-            reverse("farmacia:resolver_receta", args=(solicitud.pk,)),
-            {"decision": "aprobar"},
-            follow=True,
-        )
-
-        self.assertContains(respuesta, "Esta solicitud ya fue revisada.")
-        solicitud.refresh_from_db()
-        self.assertEqual(solicitud.estado, SolicitudRevisionReceta.Estado.RECHAZADA)
-
-    def test_formulario_rechaza_archivo_que_no_es_imagen(self):
-        datos = self.datos_solicitud_receta()
-        datos["foto_receta"] = SimpleUploadedFile(
-            "receta.png",
-            b"esto no es una imagen",
-            content_type="image/png",
-        )
-
-        respuesta = self.client.post(
-            reverse("farmacia:solicitar_receta"),
-            datos,
-        )
-
-        self.assertEqual(respuesta.status_code, 400)
-        self.assertTrue(respuesta.context["form"].errors["foto_receta"])
-        self.assertFalse(SolicitudRevisionReceta.objects.exists())
 
     def test_caja_rechaza_cantidad_superior_al_stock_vendible(self):
         quimico = User.objects.create_user(
@@ -691,152 +591,6 @@ class RegistroUsuarioTests(TestCase):
             {},
         )
 
-    def test_administrador_aprueba_y_asigna_grupo_solicitado(self):
-        self.client.post(reverse("registro"), self.datos_registro)
-        solicitud = SolicitudCuenta.objects.get(usuario__username="nuevo_usuario")
-
-        solicitud.aprobar(self.admin)
-
-        usuario = solicitud.usuario
-        self.assertTrue(usuario.is_active)
-        self.assertEqual(solicitud.estado, SolicitudCuenta.Estado.APROBADA)
-        self.assertTrue(usuario.groups.filter(name=GRUPO_FARMACEUTICO).exists())
-        self.assertTrue(
-            self.client.login(username="nuevo_usuario", password="Cuenta-segura-123")
-        )
-
-    def test_solicitante_no_puede_pedir_rol_administrador(self):
-        datos = {**self.datos_registro, "rol_solicitado": "jefe"}
-
-        respuesta = self.client.post(
-            reverse("registro"),
-            datos,
-        )
-
-        self.assertEqual(respuesta.status_code, 400)
-        self.assertFalse(User.objects.filter(username="nuevo_usuario").exists())
-
-    def test_usuario_no_administrador_no_puede_aprobar_solicitudes(self):
-        self.client.post(reverse("registro"), self.datos_registro)
-        solicitud = SolicitudCuenta.objects.get(usuario__username="nuevo_usuario")
-        usuario_normal = User.objects.create_user(
-            username="otro",
-            email="otro@example.com",
-            password="Otra-password-123",
-        )
-
-        with self.assertRaises(PermissionDenied):
-            solicitud.aprobar(usuario_normal)
-
-        self.assertEqual(solicitud.estado, SolicitudCuenta.Estado.PENDIENTE)
-        self.assertFalse(solicitud.usuario.is_active)
-
-    def test_cliente_nuevo_no_requiere_que_admin_apruebe_solicitud(self):
-        self.datos_registro["rol_solicitado"] = SolicitudCuenta.RolSolicitado.CLIENTE
-        self.client.post(reverse("registro"), self.datos_registro)
-        cliente = User.objects.get(username="nuevo_usuario")
-
-        grupos = set(cliente.groups.values_list("name", flat=True))
-        self.assertEqual(grupos, {"Cliente"})
-        self.assertFalse(cliente.is_staff)
-        self.assertFalse(cliente.is_superuser)
-
-    def test_solicitud_pendiente_se_puede_rechazar(self):
-        self.client.post(reverse("registro"), self.datos_registro)
-        solicitud = SolicitudCuenta.objects.get(usuario__username="nuevo_usuario")
-
-        solicitud.rechazar(self.admin)
-
-        self.assertEqual(solicitud.estado, SolicitudCuenta.Estado.RECHAZADA)
-        self.assertFalse(solicitud.usuario.is_active)
-        self.assertIsNotNone(solicitud.fecha_revision)
-        self.assertFalse(
-            self.client.login(username="nuevo_usuario", password="Cuenta-segura-123")
-        )
-
-    def test_administrador_aprueba_solicitud_desde_panel_admin(self):
-        self.client.post(reverse("registro"), self.datos_registro)
-        solicitud = SolicitudCuenta.objects.get(usuario__username="nuevo_usuario")
-        self.client.force_login(self.admin)
-
-        revision_url = reverse(
-            "admin:farmacia_solicitudcuenta_revisar",
-            args=(solicitud.pk,),
-        )
-        pagina_revision = self.client.get(revision_url)
-        self.assertEqual(pagina_revision.status_code, 200)
-        self.assertContains(pagina_revision, "farmacia/admin.css?v=5")
-        self.assertContains(pagina_revision, "Aprobar y activar cuenta")
-
-        respuesta = self.client.post(
-            reverse(
-                "admin:farmacia_solicitudcuenta_resolver",
-                args=(solicitud.pk,),
-            ),
-            {
-                "decision": "aprobar",
-            },
-        )
-
-        self.assertEqual(respuesta.status_code, 302)
-        solicitud.refresh_from_db()
-        self.assertEqual(solicitud.estado, SolicitudCuenta.Estado.APROBADA)
-        self.assertTrue(solicitud.usuario.is_active)
-
-    def test_admin_muestra_enlace_directo_para_revisar_quimico(self):
-        self.client.post(reverse("registro"), self.datos_registro)
-        solicitud = SolicitudCuenta.objects.get(usuario__username="nuevo_usuario")
-        self.client.force_login(self.admin)
-
-        respuesta = self.client.get(
-            reverse("admin:farmacia_solicitudcuenta_changelist")
-        )
-
-        self.assertContains(respuesta, "Revisar solicitud")
-        self.assertContains(
-            respuesta,
-            reverse(
-                "admin:farmacia_solicitudcuenta_revisar",
-                args=(solicitud.pk,),
-            ),
-        )
-
-    def test_personal_sin_privilegios_no_puede_abrir_revision_directa(self):
-        self.client.post(reverse("registro"), self.datos_registro)
-        solicitud = SolicitudCuenta.objects.get(usuario__username="nuevo_usuario")
-        usuario_staff = User.objects.create_user(
-            username="staff_revision",
-            email="staff-revision@example.com",
-            password="Staff-password-123",
-            is_staff=True,
-        )
-        self.client.force_login(usuario_staff)
-
-        respuesta = self.client.get(
-            reverse(
-                "admin:farmacia_solicitudcuenta_revisar",
-                args=(solicitud.pk,),
-            )
-        )
-
-        self.assertEqual(respuesta.status_code, 403)
-
-    def test_resolucion_de_solicitud_solo_acepta_post(self):
-        self.client.post(reverse("registro"), self.datos_registro)
-        solicitud = SolicitudCuenta.objects.get(usuario__username="nuevo_usuario")
-        self.client.force_login(self.admin)
-
-        respuesta = self.client.get(
-            reverse(
-                "admin:farmacia_solicitudcuenta_resolver",
-                args=(solicitud.pk,),
-            )
-        )
-
-        self.assertEqual(respuesta.status_code, 405)
-        solicitud.refresh_from_db()
-        self.assertEqual(solicitud.estado, SolicitudCuenta.Estado.PENDIENTE)
-
     def test_personal_sin_privilegios_no_puede_ver_solicitudes(self):
         usuario_staff = User.objects.create_user(
             username="staff",
@@ -861,6 +615,11 @@ class RegistroUsuarioTests(TestCase):
         self.assertContains(respuesta, "farmacia/admin.css?v=5")
         self.assertContains(respuesta, "Resumen de inventario")
         self.assertContains(respuesta, "Abrir Caja")
+        self.assertContains(respuesta, "Consultas al Jefe de Farmacia")
+        self.assertContains(
+            respuesta,
+            reverse("farmacia:consultas_jefe"),
+        )
         self.assertContains(respuesta, reverse("farmacia:caja"))
         self.assertContains(respuesta, "Registrar o revisar ingresos")
         self.assertContains(respuesta, "Solicitudes de qu")

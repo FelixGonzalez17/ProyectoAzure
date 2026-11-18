@@ -13,7 +13,6 @@ from farmacia.storage import PrivatePrescriptionStorage
 
 
 GRUPO_FARMACEUTICO = "Auditor_QF"
-GRUPO_CLIENTE = "Cliente"
 GRUPO_JEFE_FARMACIA = "Jefe de Farmacia"
 
 
@@ -103,122 +102,6 @@ class VentaRecetaRetenida(models.Model):
 
     def __str__(self):
         return f"Venta #{self.pk} - {self.cliente_rut}"
-
-
-class SolicitudRevisionReceta(models.Model):
-    class Estado(models.TextChoices):
-        PENDIENTE = "pendiente", "Pendiente de revisión"
-        APROBADA = "aprobada", "Aprobada"
-        RECHAZADA = "rechazada", "Rechazada"
-
-    cliente = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,
-        related_name="solicitudes_revision_receta",
-        null=True,
-        blank=True,
-        verbose_name="Cuenta del cliente",
-    )
-    cliente_nombre = models.CharField("Nombre del cliente", max_length=150)
-    cliente_rut = models.CharField(
-        "RUT del cliente",
-        max_length=12,
-        validators=[validar_rut_chileno],
-    )
-    medicamento = models.CharField("Medicamento solicitado", max_length=200)
-    cantidad = models.PositiveSmallIntegerField(
-        "Cantidad solicitada",
-        validators=[MinValueValidator(1)],
-    )
-    medico_prescriptor = models.CharField("Médico prescriptor", max_length=200)
-    foto_receta = models.ImageField(
-        "Foto de la receta",
-        upload_to="solicitudes_receta/%Y/%m/",
-        storage=PrivatePrescriptionStorage(),
-    )
-    estado = models.CharField(
-        "Estado",
-        max_length=10,
-        choices=Estado.choices,
-        default=Estado.PENDIENTE,
-    )
-    revisada_por = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.PROTECT,
-        related_name="solicitudes_receta_revisadas",
-        null=True,
-        blank=True,
-        verbose_name="Químico farmacéutico que revisa",
-    )
-    respuesta = models.TextField("Observación de la revisión", blank=True)
-    fecha_solicitud = models.DateTimeField("Fecha de solicitud", auto_now_add=True)
-    fecha_revision = models.DateTimeField(
-        "Fecha de revisión",
-        null=True,
-        blank=True,
-    )
-
-    class Meta:
-        verbose_name = "solicitud de revisión de receta"
-        verbose_name_plural = "solicitudes de revisión de recetas"
-        ordering = ("-fecha_solicitud",)
-        constraints = [
-            models.CheckConstraint(
-                check=Q(cantidad__gt=0),
-                name="solicitud_receta_cantidad_positiva",
-            ),
-            models.CheckConstraint(
-                check=(
-                    Q(
-                        estado="pendiente",
-                        revisada_por__isnull=True,
-                        fecha_revision__isnull=True,
-                    )
-                    | Q(
-                        estado__in=("aprobada", "rechazada"),
-                        revisada_por__isnull=False,
-                        fecha_revision__isnull=False,
-                    )
-                ),
-                name="solicitud_receta_revision_consistente",
-            ),
-        ]
-
-    def resolver(self, revisor, aprobada, respuesta=""):
-        if not (
-            revisor.is_superuser
-            or revisor.groups.filter(name=GRUPO_FARMACEUTICO).exists()
-        ):
-            raise PermissionDenied(
-                "Solo un químico farmacéutico puede revisar solicitudes de recetas."
-            )
-
-        with transaction.atomic():
-            solicitud = type(self).objects.select_for_update().get(pk=self.pk)
-            if solicitud.estado != self.Estado.PENDIENTE:
-                raise ValidationError("Esta solicitud ya fue revisada.")
-            solicitud.estado = (
-                self.Estado.APROBADA if aprobada else self.Estado.RECHAZADA
-            )
-            solicitud.revisada_por = revisor
-            solicitud.respuesta = respuesta.strip()
-            solicitud.fecha_revision = timezone.now()
-            solicitud.save(
-                update_fields=(
-                    "estado",
-                    "revisada_por",
-                    "respuesta",
-                    "fecha_revision",
-                )
-            )
-
-        self.estado = solicitud.estado
-        self.revisada_por = solicitud.revisada_por
-        self.respuesta = solicitud.respuesta
-        self.fecha_revision = solicitud.fecha_revision
-
-    def __str__(self):
-        return f"Solicitud de receta #{self.pk} - {self.get_estado_display()}"
 
 
 class SimulacionPago(models.Model):
@@ -494,7 +377,6 @@ class AutorizacionExcepcional(models.Model):
 class SolicitudCuenta(models.Model):
     class RolSolicitado(models.TextChoices):
         FARMACEUTICO = "farmaceutico", "Químico en farmacia"
-        CLIENTE = "cliente", "Cliente"
 
     class Estado(models.TextChoices):
         PENDIENTE = "pendiente", "Pendiente"
@@ -546,7 +428,6 @@ class SolicitudCuenta(models.Model):
 
         grupos_por_rol = {
             self.RolSolicitado.FARMACEUTICO: GRUPO_FARMACEUTICO,
-            self.RolSolicitado.CLIENTE: GRUPO_CLIENTE,
         }
         nombre_grupo = grupos_por_rol.get(self.rol_solicitado)
         if nombre_grupo is None:
@@ -770,3 +651,126 @@ class Merma(models.Model):
 
     def __str__(self):
         return f"Merma de {self.cantidad} unidades — {self.ingreso}"
+
+
+class ConsultaJefeFarmacia(models.Model):
+    class Estado(models.TextChoices):
+        PENDIENTE = "pendiente", "Pendiente de respuesta"
+        RESPONDIDA = "respondida", "Respondida"
+
+    solicitante = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="consultas_jefe_farmacia",
+        verbose_name="Químico farmacéutico",
+    )
+    asunto = models.CharField("Asunto", max_length=160)
+    pregunta = models.TextField("Consulta")
+    foto_receta = models.ImageField(
+        "Foto de la receta",
+        upload_to="consultas_jefe/%Y/%m/",
+        storage=PrivatePrescriptionStorage(),
+    )
+    estado = models.CharField(
+        "Estado",
+        max_length=12,
+        choices=Estado.choices,
+        default=Estado.PENDIENTE,
+    )
+    respuesta = models.TextField("Respuesta del Jefe de Farmacia", blank=True)
+    jefe_farmacia = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="consultas_jefe_farmacia_respondidas",
+        null=True,
+        blank=True,
+        verbose_name="Jefe de Farmacia que respondió",
+    )
+    fecha_solicitud = models.DateTimeField("Fecha de envío", auto_now_add=True)
+    fecha_respuesta = models.DateTimeField(
+        "Fecha de respuesta",
+        null=True,
+        blank=True,
+    )
+
+    class Meta:
+        verbose_name = "consulta al Jefe de Farmacia"
+        verbose_name_plural = "consultas al Jefe de Farmacia"
+        ordering = ("estado", "-fecha_solicitud")
+        constraints = [
+            models.CheckConstraint(
+                check=(
+                    Q(
+                        estado="pendiente",
+                        jefe_farmacia__isnull=True,
+                        fecha_respuesta__isnull=True,
+                    )
+                    | Q(
+                        estado="respondida",
+                        jefe_farmacia__isnull=False,
+                        fecha_respuesta__isnull=False,
+                    )
+                ),
+                name="consulta_jefe_respuesta_consistente",
+            ),
+        ]
+
+    def clean(self):
+        super().clean()
+        errores = {}
+        if self.solicitante_id and not self.solicitante.groups.filter(
+            name=GRUPO_FARMACEUTICO
+        ).exists():
+            errores["solicitante"] = (
+                "La consulta debe ser enviada por un Químico Farmacéutico."
+            )
+        if self.jefe_farmacia_id and not (
+            self.jefe_farmacia.is_superuser
+            or self.jefe_farmacia.groups.filter(
+                name=GRUPO_JEFE_FARMACIA
+            ).exists()
+        ):
+            errores["jefe_farmacia"] = (
+                "La respuesta debe registrarla el Jefe de Farmacia."
+            )
+        if errores:
+            raise ValidationError(errores)
+
+    def responder(self, jefe, respuesta):
+        if not (
+            jefe.is_superuser
+            or jefe.groups.filter(name=GRUPO_JEFE_FARMACIA).exists()
+        ):
+            raise PermissionDenied(
+                "Solo el Jefe de Farmacia puede responder estas consultas."
+            )
+        respuesta = respuesta.strip()
+        if not respuesta:
+            raise ValidationError(
+                {"respuesta": "Escribe una respuesta antes de enviarla."}
+            )
+        if len(respuesta) > 5000:
+            raise ValidationError(
+                {"respuesta": "La respuesta no puede superar los 5000 caracteres."}
+            )
+
+        fecha_respuesta = timezone.now()
+        actualizadas = type(self).objects.filter(
+            pk=self.pk,
+            estado=self.Estado.PENDIENTE,
+        ).update(
+            estado=self.Estado.RESPONDIDA,
+            respuesta=respuesta,
+            jefe_farmacia=jefe,
+            fecha_respuesta=fecha_respuesta,
+        )
+        if not actualizadas:
+            raise ValidationError("Esta consulta ya fue respondida.")
+
+        self.estado = self.Estado.RESPONDIDA
+        self.respuesta = respuesta
+        self.jefe_farmacia = jefe
+        self.fecha_respuesta = fecha_respuesta
+
+    def __str__(self):
+        return f"Consulta #{self.pk} — {self.asunto} ({self.get_estado_display()})"

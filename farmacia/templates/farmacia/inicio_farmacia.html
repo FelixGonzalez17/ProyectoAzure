@@ -30,14 +30,16 @@
                 <span>Con stock disponible</span>
             </div>
         </article>
-        <a class="estadistica estadistica-enlace" href="{% url 'farmacia:revisar_recetas' %}">
+        {% if consultas_jefe_disponible %}
+        <a class="estadistica estadistica-enlace" href="{% url 'farmacia:consultas_jefe' %}">
             <span class="estadistica-icono icono-ambar" aria-hidden="true">⌁</span>
             <div>
-                <strong>{{ recetas_pendientes }}</strong>
-                <span>Recetas por revisar</span>
+                <strong>{{ consultas_pendientes }}</strong>
+                <span>Consultas pendientes</span>
             </div>
             <span class="estadistica-flecha" aria-hidden="true">→</span>
         </a>
+        {% endif %}
     </section>
 
     <section class="seccion-catalogo" aria-labelledby="titulo-productos">

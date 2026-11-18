@@ -74,6 +74,13 @@
                 <span>Abrir Caja<small>Registrar una venta</small></span>
                 <span class="acceso-flecha" aria-hidden="true">→</span>
             </a>
+            {% if resumen_farmacia.consultas_jefe_disponible %}
+                <a class="acceso" href="{{ resumen_farmacia.enlaces.consultas_jefe }}">
+                    <span class="acceso-icono" aria-hidden="true">?</span>
+                    <span>Consultas al Jefe de Farmacia<small>{{ resumen_farmacia.consultas_jefe_pendientes }} pendientes</small></span>
+                    <span class="acceso-flecha" aria-hidden="true">→</span>
+                </a>
+            {% endif %}
             <a class="acceso" href="{{ resumen_farmacia.enlaces.ingresos }}">
                 <span class="acceso-icono" aria-hidden="true">↓</span>
                 <span>Registrar o revisar ingresos<small>Controlar lotes y vencimientos</small></span>

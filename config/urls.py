@@ -16,18 +16,22 @@ Including another URLconf
 """
 from django.contrib.auth import views as auth_views
 from django.urls import include, path
+from django.views.generic import RedirectView
 
 from farmacia.admin import farmacia_admin_site
-from farmacia.views import IniciarSesionView, catalogo, registrar_usuario
+from farmacia.views import IniciarSesionView
 
 urlpatterns = [
-    path('', catalogo, name='catalogo'),
+    path('', IniciarSesionView.as_view(), name='login'),
     path(
         'accounts/login/',
-        IniciarSesionView.as_view(),
-        name='login',
+        RedirectView.as_view(
+            pattern_name='login',
+            permanent=False,
+            query_string=True,
+        ),
+        name='login_legacy',
     ),
-    path('accounts/register/', registrar_usuario, name='registro'),
     path(
         'accounts/logout/',
         auth_views.LogoutView.as_view(),

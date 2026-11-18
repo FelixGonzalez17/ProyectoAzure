@@ -19,7 +19,10 @@ from django.views.decorators.http import require_POST
 
 from farmacia.models import (
     AutorizacionExcepcional,
+    ConsultaJefeFarmacia,
     DetalleVentaCaja,
+    GRUPO_FARMACEUTICO,
+    GRUPO_JEFE_FARMACIA,
     IngresoInventario,
     Medicamento,
     Merma,
@@ -214,7 +217,17 @@ class FarmaAdminSite(admin.AdminSite):
                         "admin:farmacia_solicitudcuenta_changelist"
                     ),
                     "caja": reverse("farmacia:caja"),
+                    "consultas_jefe": reverse("farmacia:consultas_jefe"),
                 },
+                "consultas_jefe_disponible": (
+                    request.user.is_superuser
+                    or request.user.groups.filter(
+                        name__in=(GRUPO_FARMACEUTICO, GRUPO_JEFE_FARMACIA)
+                    ).exists()
+                ),
+                "consultas_jefe_pendientes": ConsultaJefeFarmacia.objects.filter(
+                    estado=ConsultaJefeFarmacia.Estado.PENDIENTE
+                ).count(),
             },
         }
         return super().index(request, extra_context)

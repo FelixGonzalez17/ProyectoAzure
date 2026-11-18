@@ -1,255 +1,64 @@
 from decimal import Decimal
-from mimetypes import guess_type
 from uuid import UUID, uuid4
 
+from PIL import Image
 from django.contrib import messages
 from django.contrib.auth import get_user_model
 from django.contrib.auth.decorators import login_required
-from django.contrib.auth.forms import AuthenticationForm
 from django.contrib.auth.views import LoginView
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
+from django.core.paginator import Paginator
 from django.http import FileResponse, Http404
 from django.db.models import F, IntegerField, OuterRef, Q, Subquery, Sum, Value
 from django.db.models.functions import Coalesce
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
-from django.views.decorators.http import require_http_methods, require_POST
+from django.views.decorators.http import require_http_methods
 
-from farmacia.forms import RegistroUsuarioForm
+from farmacia.auth_forms import EmployeeAuthenticationForm
 from farmacia.models import (
-    GRUPO_CLIENTE,
     GRUPO_FARMACEUTICO,
+    GRUPO_JEFE_FARMACIA,
+    ConsultaJefeFarmacia,
     IngresoInventario,
     Medicamento,
-    SolicitudRevisionReceta,
     SimulacionPago,
-    SolicitudCuenta,
     DetalleVentaCaja,
     VentaCaja,
 )
-from farmacia.receta_forms import SolicitudRevisionRecetaForm
-
-
-def _quitar_autofocus(*formularios):
-    for formulario in formularios:
-        for campo in formulario.fields.values():
-            campo.widget.attrs.pop("autofocus", None)
+from farmacia.consulta_forms import ConsultaJefeFarmaciaForm
 
 
 class IniciarSesionView(LoginView):
     template_name = "farmacia/login.html"
+    authentication_form = EmployeeAuthenticationForm
+    redirect_authenticated_user = True
 
     def get_success_url(self):
         if self.request.user.is_staff:
             return reverse("admin:index")
-        if self.request.user.groups.filter(name=GRUPO_FARMACEUTICO).exists():
-            return reverse("farmacia:inicio")
-        return super().get_success_url()
-
-    def get_context_data(self, **kwargs):
-        context = super().get_context_data(**kwargs)
-        context.setdefault("registro_form", RegistroUsuarioForm())
-        _quitar_autofocus(context["form"], context["registro_form"])
-        return context
-
-
-@require_POST
-def registrar_usuario(request):
-    registro_form = RegistroUsuarioForm(request.POST)
-    if registro_form.is_valid():
-        es_cliente = (
-            registro_form.cleaned_data["rol_solicitado"]
-            == SolicitudCuenta.RolSolicitado.CLIENTE
-        )
-        registro_form.save()
-        if es_cliente:
-            messages.success(
-                request,
-                "Tu cuenta ya está creada. Inicia sesión para continuar.",
-            )
-        else:
-            messages.success(
-                request,
-                "Tu solicitud fue enviada. Podrás iniciar sesión cuando el administrador la apruebe.",
-            )
-        return redirect("login")
-
-    form = AuthenticationForm(request=request)
-    _quitar_autofocus(form, registro_form)
-    return render(
-        request,
-        "farmacia/login.html",
-        {
-            "form": form,
-            "registro_form": registro_form,
-        },
-        status=400,
-    )
-
-
-def catalogo(request):
-    medicamentos = [
-        {
-            "nombre": "Medicamento de ejemplo 1",
-            "codigo": "DEMO-001",
-            "descripcion": "Reemplaza este registro por información real.",
-        },
-        {
-            "nombre": "Medicamento de ejemplo 2",
-            "codigo": "DEMO-002",
-            "descripcion": "Aquí se mostrarán los detalles del producto.",
-        },
-        {
-            "nombre": "Medicamento de ejemplo 3",
-            "codigo": "DEMO-003",
-            "descripcion": "Catálogo demostrativo, sin productos reales.",
-        },
-    ]
-    busqueda = request.GET.get("q", "").strip()
-    if busqueda:
-        termino = busqueda.casefold()
-        medicamentos = [
-            medicamento
-            for medicamento in medicamentos
-            if termino in medicamento["nombre"].casefold()
-            or termino in medicamento["codigo"].casefold()
-        ]
-
-    return render(
-        request,
-        "farmacia/catalogo.html",
-        {"medicamentos": medicamentos, "busqueda": busqueda},
-    )
+        return reverse("farmacia:inicio")
 
 
 def _es_personal_farmacia(user):
     return (
         user.is_authenticated
         and (
-            user.is_staff
-            or user.groups.filter(name=GRUPO_FARMACEUTICO).exists()
+            user.is_superuser
+            or user.groups.filter(
+                name__in=(GRUPO_FARMACEUTICO, GRUPO_JEFE_FARMACIA)
+            ).exists()
         )
     )
 
 
-def _puede_revisar_recetas(user):
+def _es_jefe_farmacia(user):
     return user.is_authenticated and (
         user.is_superuser
-        or user.groups.filter(name=GRUPO_FARMACEUTICO).exists()
+        or user.groups.filter(name=GRUPO_JEFE_FARMACIA).exists()
     )
-
-
-def _puede_solicitar_receta(user):
-    return not user.is_authenticated or user.groups.filter(
-        name=GRUPO_CLIENTE
-    ).exists()
-
-
-@require_http_methods(["GET", "POST"])
-def solicitar_revision_receta(request):
-    if not _puede_solicitar_receta(request.user):
-        raise PermissionDenied
-
-    nombre_inicial = ""
-    if request.user.is_authenticated:
-        nombre_inicial = request.user.get_full_name() or request.user.get_username()
-
-    if request.method == "POST":
-        form = SolicitudRevisionRecetaForm(request.POST, request.FILES)
-        if form.is_valid():
-            solicitud = form.save(commit=False)
-            if request.user.is_authenticated:
-                solicitud.cliente = request.user
-            solicitud.save()
-            messages.success(
-                request,
-                f"Recibimos tu solicitud de revisión de receta (folio #{solicitud.pk}). "
-                "Un químico farmacéutico la revisará.",
-            )
-            return redirect("farmacia:solicitar_receta")
-    else:
-        form = SolicitudRevisionRecetaForm(
-            initial={"cliente_nombre": nombre_inicial}
-        )
-
-    return render(
-        request,
-        "farmacia/solicitar_receta.html",
-        {"form": form},
-        status=400 if request.method == "POST" else 200,
-    )
-
-
-@login_required
-def revisar_solicitudes_receta(request):
-    if not _puede_revisar_recetas(request.user):
-        raise PermissionDenied
-    solicitudes = SolicitudRevisionReceta.objects.select_related(
-        "cliente",
-        "revisada_por",
-    )
-    return render(
-        request,
-        "farmacia/revisar_recetas.html",
-        {
-            "pendientes": solicitudes.filter(
-                estado=SolicitudRevisionReceta.Estado.PENDIENTE
-            ),
-            "revisadas": solicitudes.exclude(
-                estado=SolicitudRevisionReceta.Estado.PENDIENTE
-            ),
-        },
-    )
-
-
-@login_required
-@require_POST
-def resolver_solicitud_receta(request, solicitud_id):
-    if not _puede_revisar_recetas(request.user):
-        raise PermissionDenied
-    solicitud = get_object_or_404(SolicitudRevisionReceta, pk=solicitud_id)
-    decision = request.POST.get("decision")
-    if decision not in ("aprobar", "rechazar"):
-        messages.error(request, "Selecciona aprobar o rechazar la solicitud.")
-        return redirect("farmacia:revisar_recetas")
-
-    try:
-        solicitud.resolver(
-            request.user,
-            aprobada=decision == "aprobar",
-            respuesta=request.POST.get("respuesta", ""),
-        )
-    except ValidationError as error:
-        messages.error(request, " ".join(error.messages))
-    else:
-        messages.success(
-            request,
-            f"La solicitud #{solicitud.pk} quedó "
-            f"{solicitud.get_estado_display().lower()}.",
-        )
-    return redirect("farmacia:revisar_recetas")
-
-
-@login_required
-def ver_foto_solicitud_receta(request, solicitud_id):
-    if not _puede_revisar_recetas(request.user):
-        raise PermissionDenied
-    solicitud = get_object_or_404(SolicitudRevisionReceta, pk=solicitud_id)
-    content_type = guess_type(solicitud.foto_receta.name)[0]
-    if content_type not in ("image/jpeg", "image/png", "image/webp"):
-        raise Http404("El archivo de receta no tiene un formato de imagen permitido.")
-    respuesta = FileResponse(
-        solicitud.foto_receta.open("rb"),
-        content_type=content_type,
-        filename="receta",
-    )
-    respuesta["Content-Disposition"] = 'inline; filename="receta"'
-    respuesta["X-Content-Type-Options"] = "nosniff"
-    respuesta["Cache-Control"] = "private, no-store"
-    respuesta["Content-Security-Policy"] = "default-src 'none'; sandbox"
-    return respuesta
 
 
 def _medicamentos_con_stock():
@@ -277,6 +86,13 @@ def inicio_farmacia(request):
 
     medicamentos = _medicamentos_con_stock()
     disponibles = medicamentos.filter(stock_vendible__gt=0)
+    consultas_pendientes = ConsultaJefeFarmacia.objects.filter(
+        estado=ConsultaJefeFarmacia.Estado.PENDIENTE
+    )
+    if not _es_jefe_farmacia(request.user):
+        consultas_pendientes = consultas_pendientes.filter(
+            solicitante=request.user
+        )
     return render(
         request,
         "farmacia/inicio_farmacia.html",
@@ -284,11 +100,125 @@ def inicio_farmacia(request):
             "medicamentos": medicamentos.order_by("nombre"),
             "total_medicamentos": medicamentos.count(),
             "total_disponibles": disponibles.count(),
-            "recetas_pendientes": SolicitudRevisionReceta.objects.filter(
-                estado=SolicitudRevisionReceta.Estado.PENDIENTE
-            ).count(),
+            "consultas_pendientes": consultas_pendientes.count(),
+            "consultas_jefe_disponible": (
+                request.user.is_superuser
+                or request.user.groups.filter(
+                    name__in=(GRUPO_FARMACEUTICO, GRUPO_JEFE_FARMACIA)
+                ).exists()
+            ),
         },
     )
+
+
+@login_required
+@require_http_methods(["GET", "POST"])
+def consultas_jefe_farmacia(request):
+    if not (
+        request.user.is_superuser
+        or request.user.groups.filter(
+            name__in=(GRUPO_FARMACEUTICO, GRUPO_JEFE_FARMACIA)
+        ).exists()
+    ):
+        raise PermissionDenied
+
+    es_jefe = _es_jefe_farmacia(request.user)
+    if request.method == "POST":
+        if es_jefe:
+            consulta = get_object_or_404(
+                ConsultaJefeFarmacia,
+                pk=request.POST.get("consulta_id"),
+            )
+            try:
+                consulta.responder(
+                    request.user,
+                    request.POST.get("respuesta", ""),
+                )
+            except ValidationError as error:
+                messages.error(request, " ".join(error.messages))
+            else:
+                messages.success(request, f"La consulta #{consulta.pk} fue respondida.")
+            return redirect("farmacia:consultas_jefe")
+
+        if not request.user.groups.filter(name=GRUPO_FARMACEUTICO).exists():
+            raise PermissionDenied
+        form = ConsultaJefeFarmaciaForm(request.POST, request.FILES)
+        if form.is_valid():
+            consulta = form.save(commit=False)
+            consulta.solicitante = request.user
+            consulta.save()
+            messages.success(
+                request,
+                f"Tu consulta #{consulta.pk} fue enviada al Jefe de Farmacia.",
+            )
+            return redirect("farmacia:consultas_jefe")
+    else:
+        form = ConsultaJefeFarmaciaForm() if not es_jefe else None
+
+    consultas = ConsultaJefeFarmacia.objects.select_related(
+        "solicitante",
+        "jefe_farmacia",
+    )
+    if es_jefe:
+        pendientes = consultas.filter(estado=ConsultaJefeFarmacia.Estado.PENDIENTE)
+        historial = consultas.filter(estado=ConsultaJefeFarmacia.Estado.RESPONDIDA)
+    else:
+        pendientes = ConsultaJefeFarmacia.objects.none()
+        historial = consultas.filter(solicitante=request.user)
+
+    pendientes = Paginator(pendientes, 25).get_page(
+        request.GET.get("pagina_pendientes")
+    )
+    historial = Paginator(historial, 25).get_page(
+        request.GET.get("pagina_historial")
+    )
+    consultas_pendientes = ConsultaJefeFarmacia.objects.filter(
+        estado=ConsultaJefeFarmacia.Estado.PENDIENTE
+    ).count()
+    return render(
+        request,
+        "farmacia/consultas_jefe.html",
+        {
+            "form": form,
+            "es_jefe": es_jefe,
+            "pendientes": pendientes,
+            "historial": historial,
+            "consultas_pendientes": consultas_pendientes,
+        },
+    )
+
+
+@login_required
+def foto_consulta_jefe_farmacia(request, consulta_id):
+    consulta = get_object_or_404(ConsultaJefeFarmacia, pk=consulta_id)
+    es_jefe = _es_jefe_farmacia(request.user)
+    es_solicitante = (
+        request.user.groups.filter(name=GRUPO_FARMACEUTICO).exists()
+        and consulta.solicitante_id == request.user.pk
+    )
+    if not (es_jefe or es_solicitante):
+        raise PermissionDenied
+
+    try:
+        archivo = consulta.foto_receta.open("rb")
+    except OSError as error:
+        raise Http404 from error
+    try:
+        with Image.open(archivo) as imagen:
+            content_type = Image.MIME.get(imagen.format)
+    except (OSError, Image.DecompressionBombError) as error:
+        archivo.close()
+        raise Http404 from error
+    if content_type not in ("image/jpeg", "image/png", "image/webp"):
+        archivo.close()
+        raise Http404
+
+    archivo.seek(0)
+    respuesta = FileResponse(archivo, content_type=content_type)
+    respuesta["X-Content-Type-Options"] = "nosniff"
+    respuesta["Cache-Control"] = "private, no-store"
+    respuesta["Content-Security-Policy"] = "default-src 'none'; sandbox"
+    return respuesta
 
 
 def _obtener_carrito(request):
