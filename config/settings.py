@@ -10,22 +10,64 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
+import os
 from pathlib import Path
+
+from django.core.exceptions import ImproperlyConfigured
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+def _environment_bool(name, default):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ImproperlyConfigured(f"{name} debe ser un valor booleano.")
+
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-vvzv!)&1-ai0^+27&w)26$cg#d92y1t0*nu5--odyboby+06d!'
+DEBUG = _environment_bool("DJANGO_DEBUG", True)
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY")
+if not SECRET_KEY:
+    if not DEBUG:
+        raise ImproperlyConfigured(
+            "Configura DJANGO_SECRET_KEY antes de iniciar en producción."
+        )
+    SECRET_KEY = "local-development-only-not-for-production"
+elif not DEBUG and (
+    len(SECRET_KEY) < 50
+    or len(set(SECRET_KEY)) < 5
+    or SECRET_KEY.startswith("django-insecure-")
+):
+    raise ImproperlyConfigured(
+        "DJANGO_SECRET_KEY debe ser una clave aleatoria de al menos 50 caracteres."
+    )
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
-
-ALLOWED_HOSTS = []
+hosts_value = os.environ.get("DJANGO_ALLOWED_HOSTS")
+if hosts_value:
+    ALLOWED_HOSTS = [
+        host.strip()
+        for host in hosts_value.split(",")
+        if host.strip()
+    ]
+    if not ALLOWED_HOSTS:
+        raise ImproperlyConfigured(
+            "DJANGO_ALLOWED_HOSTS debe incluir al menos un dominio."
+        )
+elif DEBUG:
+    ALLOWED_HOSTS = ["localhost", "127.0.0.1", "testserver"]
+else:
+    raise ImproperlyConfigured(
+        "Configura DJANGO_ALLOWED_HOSTS con los dominios permitidos."
+    )
 
 
 # Application definition
@@ -73,6 +115,29 @@ LOGIN_URL = '/'
 LOGIN_REDIRECT_URL = '/'
 LOGOUT_REDIRECT_URL = '/'
 
+SECURE_SSL_REDIRECT = _environment_bool(
+    "DJANGO_SECURE_SSL_REDIRECT",
+    not DEBUG,
+)
+SESSION_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SECURE = not DEBUG
+SECURE_CONTENT_TYPE_NOSNIFF = True
+try:
+    SECURE_HSTS_SECONDS = int(os.environ.get("DJANGO_HSTS_SECONDS", "0"))
+except ValueError as error:
+    raise ImproperlyConfigured(
+        "DJANGO_HSTS_SECONDS debe ser un entero no negativo."
+    ) from error
+if SECURE_HSTS_SECONDS < 0:
+    raise ImproperlyConfigured("DJANGO_HSTS_SECONDS no puede ser negativo.")
+SECURE_HSTS_INCLUDE_SUBDOMAINS = _environment_bool(
+    "DJANGO_HSTS_INCLUDE_SUBDOMAINS",
+    False,
+)
+SECURE_HSTS_PRELOAD = _environment_bool("DJANGO_HSTS_PRELOAD", False)
+if _environment_bool("DJANGO_TRUST_X_FORWARDED_PROTO", False):
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
 
 # Database
 # https://docs.djangoproject.com/en/6.1/ref/settings/#databases
@@ -109,7 +174,7 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = 'es-cl'
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = 'America/Santiago'
 
 USE_I18N = True
 
@@ -125,8 +190,4 @@ STATIC_URL = 'static/'
 # Email
 # https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
 
-MAILERS = {
-    'default': {
-        'BACKEND': 'django.core.mail.backends.console.EmailBackend',
-    },
-}
+EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'

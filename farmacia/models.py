@@ -555,9 +555,25 @@ class IngresoInventario(models.Model):
             ),
         ]
 
+    def clean(self):
+        super().clean()
+        if (
+            self.fecha_vencimiento
+            and self.fecha_vencimiento < timezone.localdate()
+        ):
+            raise ValidationError(
+                {
+                    "fecha_vencimiento": (
+                        "No se puede ingresar un lote cuya fecha de vencimiento "
+                        "ya pasó."
+                    )
+                }
+            )
+
     def save(self, *args, **kwargs):
         if self._state.adding:
             self.stock_disponible = self.cantidad
+            self.full_clean()
         else:
             original = type(self).objects.only("cantidad").get(pk=self.pk)
             if self.cantidad != original.cantidad:

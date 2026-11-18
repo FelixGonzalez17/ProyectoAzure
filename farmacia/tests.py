@@ -1,4 +1,4 @@
-from datetime import date, timedelta
+from datetime import timedelta
 from decimal import Decimal
 from io import BytesIO
 
@@ -9,6 +9,7 @@ from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 from django.urls import reverse
+from django.utils import timezone
 from PIL import Image
 
 from farmacia.models import (
@@ -138,7 +139,7 @@ class AccesoYFarmaciaTests(TestCase):
             medicamento=medicamento,
             lote="LOTE-QF-001",
             cantidad=12,
-            fecha_vencimiento=date.today() + timedelta(days=90),
+            fecha_vencimiento=timezone.localdate() + timedelta(days=90),
             registrado_por=self.admin,
         )
         self.client.force_login(quimico)
@@ -195,7 +196,7 @@ class AccesoYFarmaciaTests(TestCase):
             medicamento=medicamento,
             lote="LOTE-RECETA-002",
             cantidad=3,
-            fecha_vencimiento=date.today() + timedelta(days=90),
+            fecha_vencimiento=timezone.localdate() + timedelta(days=90),
             registrado_por=self.admin,
         )
         self.client.force_login(quimico)
@@ -222,7 +223,7 @@ class AccesoYFarmaciaTests(TestCase):
             medicamento=medicamento,
             lote="LOTE-CAJA-001",
             cantidad=5,
-            fecha_vencimiento=date.today() + timedelta(days=90),
+            fecha_vencimiento=timezone.localdate() + timedelta(days=90),
             registrado_por=self.admin,
         )
         self.client.force_login(quimico)
@@ -267,14 +268,14 @@ class AccesoYFarmaciaTests(TestCase):
             medicamento=medicamento,
             lote="LOTE-VENTA-PROXIMO",
             cantidad=2,
-            fecha_vencimiento=date.today() + timedelta(days=30),
+            fecha_vencimiento=timezone.localdate() + timedelta(days=30),
             registrado_por=self.admin,
         )
         lote_posterior = IngresoInventario.objects.create(
             medicamento=medicamento,
             lote="LOTE-VENTA-POSTERIOR",
             cantidad=5,
-            fecha_vencimiento=date.today() + timedelta(days=60),
+            fecha_vencimiento=timezone.localdate() + timedelta(days=60),
             registrado_por=self.admin,
         )
         self.client.force_login(quimico)
@@ -355,7 +356,7 @@ class AccesoYFarmaciaTests(TestCase):
             medicamento=medicamento,
             lote="LOTE-VENTA-LIMITADO",
             cantidad=1,
-            fecha_vencimiento=date.today() + timedelta(days=60),
+            fecha_vencimiento=timezone.localdate() + timedelta(days=60),
             registrado_por=self.admin,
         )
         self.client.force_login(quimico)
@@ -398,7 +399,7 @@ class AccesoYFarmaciaTests(TestCase):
             medicamento=medicamento,
             lote="LOTE-VENTA-RECETA",
             cantidad=3,
-            fecha_vencimiento=date.today() + timedelta(days=60),
+            fecha_vencimiento=timezone.localdate() + timedelta(days=60),
             registrado_por=self.admin,
         )
         self.client.force_login(quimico)
@@ -572,7 +573,7 @@ class AccesoYFarmaciaTests(TestCase):
             medicamento=medicamento,
             lote="LOTE-CAJA-002",
             cantidad=1,
-            fecha_vencimiento=date.today() + timedelta(days=90),
+            fecha_vencimiento=timezone.localdate() + timedelta(days=90),
             registrado_por=self.admin,
         )
         self.client.force_login(quimico)
@@ -726,7 +727,9 @@ class AccesoYFarmaciaTests(TestCase):
                 "medicamento": medicamento.pk,
                 "lote": "LOTE-ADMIN-01",
                 "cantidad": 20,
-                "fecha_vencimiento": (date.today() + timedelta(days=180)).isoformat(),
+                "fecha_vencimiento": (
+                    timezone.localdate() + timedelta(days=180)
+                ).isoformat(),
                 "proveedor": "Proveedor de prueba",
                 "_save": "Guardar",
             },
@@ -745,7 +748,7 @@ class AccesoYFarmaciaTests(TestCase):
             medicamento=medicamento,
             lote="LOTE-ADMIN-02",
             cantidad=10,
-            fecha_vencimiento=date.today() + timedelta(days=180),
+            fecha_vencimiento=timezone.localdate() + timedelta(days=180),
             registrado_por=self.admin,
         )
         self.client.force_login(self.admin)
@@ -777,7 +780,7 @@ class AccesoYFarmaciaTests(TestCase):
             medicamento=medicamento,
             lote="LOTE-001",
             cantidad=10,
-            fecha_vencimiento=date.today() + timedelta(days=180),
+            fecha_vencimiento=timezone.localdate() + timedelta(days=180),
             proveedor="Proveedor de prueba",
             registrado_por=self.admin,
         )
@@ -801,24 +804,48 @@ class AccesoYFarmaciaTests(TestCase):
 
         self.assertEqual(ingreso.mermas.count(), 1)
         self.assertEqual(ingreso.mermas.count(), 1)
+
+    def test_ingreso_no_acepta_lote_vencido(self):
+        medicamento = Medicamento.objects.create(
+            codigo="MED-INGRESO-VENCIDO",
+            nombre="Medicamento vencido",
+        )
+        ingreso = IngresoInventario(
+            medicamento=medicamento,
+            lote="LOTE-INGRESO-VENCIDO",
+            cantidad=1,
+            fecha_vencimiento=timezone.localdate() - timedelta(days=1),
+            registrado_por=self.admin,
+        )
+
+        with self.assertRaises(ValidationError):
+            ingreso.save()
+
+        self.assertFalse(
+            IngresoInventario.objects.filter(lote="LOTE-INGRESO-VENCIDO").exists()
+        )
+
     def test_lotes_vencidos_no_aparecen_como_stock_disponible_en_admin(self):
         medicamento = Medicamento.objects.create(
             codigo="MED-VENCIDO-001",
             nombre="Producto con lote vencido",
             stock_minimo=2,
         )
-        IngresoInventario.objects.create(
+        ingreso_vencido = IngresoInventario.objects.create(
             medicamento=medicamento,
             lote="LOTE-VENCIDO-01",
             cantidad=10,
-            fecha_vencimiento=date.today() - timedelta(days=1),
+            fecha_vencimiento=timezone.localdate() + timedelta(days=1),
             registrado_por=self.admin,
+        )
+        IngresoInventario.objects.filter(pk=ingreso_vencido.pk).update(
+            fecha_vencimiento=timezone.localdate() - timedelta(days=1)
         )
         IngresoInventario.objects.create(
             medicamento=medicamento,
             lote="LOTE-VIGENTE-01",
             cantidad=3,
-            fecha_vencimiento=date.today() + timedelta(days=30),
+            fecha_vencimiento=timezone.localdate() + timedelta(days=30),
             registrado_por=self.admin,
         )
         self.client.force_login(self.admin)
@@ -837,12 +864,15 @@ class AccesoYFarmaciaTests(TestCase):
             nombre="Producto vencido sin stock vigente",
             stock_minimo=2,
         )
-        IngresoInventario.objects.create(
+        ingreso_vencido = IngresoInventario.objects.create(
             medicamento=medicamento,
             lote="LOTE-VENCIDO-02",
             cantidad=10,
-            fecha_vencimiento=date.today() - timedelta(days=1),
+            fecha_vencimiento=timezone.localdate() + timedelta(days=1),
             registrado_por=self.admin,
+        )
+        IngresoInventario.objects.filter(pk=ingreso_vencido.pk).update(
+            fecha_vencimiento=timezone.localdate() - timedelta(days=1)
         )
         self.client.force_login(self.admin)
 
